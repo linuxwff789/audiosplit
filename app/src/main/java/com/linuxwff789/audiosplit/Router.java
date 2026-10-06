@@ -123,15 +123,30 @@ public final class Router {
         }
         AudioDeviceInfo speaker = firstOfType(outs, AudioDeviceInfo.TYPE_BUILTIN_SPEAKER);
         AudioDeviceInfo a2dp = firstOfType(outs, AudioDeviceInfo.TYPE_BLUETOOTH_A2DP);
-        if (speaker == null) {
-            Log.e("built-in speaker not available", null);
+        AudioDeviceInfo wired = deviceFor("wired", outs);
+        // Where apps that are NOT pinned already play. The mix for this device is registered
+        // FIRST: an unpinned app matches the first mix whose usage rules fit, so it keeps its
+        // current route instead of being pulled to the speaker.
+        AudioDeviceInfo defaultDev = a2dp != null ? a2dp : (wired != null ? wired : speaker);
+        List<AudioDeviceInfo> mixDevices = new ArrayList<>();
+        if (defaultDev != null) {
+            mixDevices.add(defaultDev);
+        }
+        for (Config.App app : cfg.apps) {
+            AudioDeviceInfo d = deviceFor(app.device, outs);
+            if (d != null && !containsDevice(mixDevices, d)) {
+                mixDevices.add(d);
+            }
+        }
+        if (mixDevices.isEmpty()) {
+            Log.e("no usable output device to build mixes for", null);
             return;
         }
 
-        String sig = "spk" + speaker.getId() + "/a2dp" + (a2dp == null ? -1 : a2dp.getId());
+        String sig = deviceSig(mixDevices);
         if (sPolicy == null || !sig.equals(sDeviceSig)) {
             unregister(am);
-            register(am, ctx, speaker, a2dp);
+            register(am, ctx, mixDevices);
             sDeviceSig = sig;
             sApplied.clear();
         }
@@ -179,14 +194,12 @@ public final class Router {
         }
     }
 
-    private static void register(AudioManager am, Context ctx, AudioDeviceInfo speaker,
-                                 AudioDeviceInfo a2dp) {
+    private static void register(AudioManager am, Context ctx, List<AudioDeviceInfo> devices) {
         try {
             ArrayList<Object> mixes = new ArrayList<>();
-            if (a2dp != null) {
-                mixes.add(buildMix(a2dp));
+            for (AudioDeviceInfo d : devices) {
+                mixes.add(buildMix(d));
             }
-            mixes.add(buildMix(speaker));
 
             Object pb = cPolicyBuilder.getConstructor(Context.class).newInstance(ctx);
             for (Object mix : mixes) {
@@ -281,6 +294,23 @@ public final class Router {
             }
         }
         return null;
+    }
+
+    private static boolean containsDevice(List<AudioDeviceInfo> list, AudioDeviceInfo dev) {
+        for (AudioDeviceInfo d : list) {
+            if (d.getId() == dev.getId()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String deviceSig(List<AudioDeviceInfo> devices) {
+        StringBuilder sb = new StringBuilder();
+        for (AudioDeviceInfo d : devices) {
+            sb.append(d.getType()).append(':').append(d.getId()).append(',');
+        }
+        return sb.toString();
     }
 
     private static int uidOf(Context ctx, String pkg) {
