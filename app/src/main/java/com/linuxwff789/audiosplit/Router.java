@@ -1,11 +1,15 @@
 package com.linuxwff789.audiosplit;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ApplicationInfo;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -54,6 +58,8 @@ public final class Router {
 
     private static Handler sHandler;
     private static boolean sRunning;
+    private static Config sPushed;
+    private static boolean sReceiverRegistered;
 
     private Router() {
     }
@@ -79,18 +85,76 @@ public final class Router {
         if (sHandler == null) {
             sHandler = new Handler(Looper.getMainLooper());
         }
+        registerConfigReceiver(ctx);
         tick(ctx);
+    }
+
+    /** The UI pushes its config straight into system_server, no root and no file permissions. */
+    private static void registerConfigReceiver(final Context ctx) {
+        if (sReceiverRegistered) {
+            return;
+        }
+        try {
+            BroadcastReceiver receiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    try {
+                        String json = intent.getStringExtra(Protocol.EXTRA_JSON);
+                        if (json == null) {
+                            Log.i("status ping from UI");
+                        } else {
+                            Config cfg = Config.parse(json, "push");
+                            if (cfg == null) {
+                                Log.e("pushed config rejected", null);
+                            } else {
+                                sPushed = cfg;
+                                Log.i("config pushed from UI: " + cfg);
+                                tick(ctx);
+                            }
+                        }
+                        sendStatus(ctx);
+                    } catch (Throwable t) {
+                        Log.e("config broadcast handling failed", t);
+                    }
+                }
+            };
+            IntentFilter filter = new IntentFilter(Protocol.ACTION_CONFIG);
+            if (Build.VERSION.SDK_INT >= 33) {
+                ctx.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                ctx.registerReceiver(receiver, filter);
+            }
+            sReceiverRegistered = true;
+            Log.i("config receiver registered");
+        } catch (Throwable t) {
+            Log.e("registerReceiver failed", t);
+        }
+    }
+
+    private static void sendStatus(Context ctx) {
+        try {
+            Intent out = new Intent(Protocol.ACTION_STATUS);
+            out.setPackage(Protocol.PKG);
+            out.putExtra(Protocol.EXTRA_TEXT, Status.tail(80));
+            ctx.sendBroadcast(out);
+        } catch (Throwable t) {
+            Log.e("status broadcast failed", t);
+        }
     }
 
     private static synchronized void tick(final Context ctx) {
         try {
-            Config cfg = Config.load();
+            Config cfg = sPushed;
             if (cfg == null) {
-                Log.i("no config at " + Config.PATHS[0] + " or " + Config.PATHS[1] + " - idle");
-            } else {
+                cfg = Config.load();
+                if (cfg == null) {
+                    Log.i("no config (no UI push, no file) - idle");
+                }
+            }
+            if (cfg != null) {
                 if (cfg.stamp != sCfgStamp) {
                     sCfgStamp = cfg.stamp;
-                    Log.i("config loaded: " + cfg);
+                    Log.i("applying config: " + cfg);
                 }
                 apply(ctx, cfg);
             }

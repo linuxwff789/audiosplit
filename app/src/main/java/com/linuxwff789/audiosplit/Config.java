@@ -29,6 +29,8 @@ public final class Config {
     public static final String[] PATHS = {
             "/data/local/tmp/audiosplit.json",
             "/data/system/audiosplit.json",
+            // the UI writes here; system_server reads the real path under /data/media
+            "/data/media/0/Android/data/com.linuxwff789.audiosplit/files/audiosplit.json",
     };
 
     public static final class App {
@@ -53,6 +55,38 @@ public final class Config {
     public long stamp;
 
     private Config() {
+    }
+
+    /** Parse a config JSON string. Returns null if it is unusable. */
+    public static Config parse(String json, String source) {
+        if (json == null || json.isEmpty()) {
+            return null;
+        }
+        try {
+            JSONObject root = new JSONObject(json);
+            Config c = new Config();
+            c.source = source;
+            c.stamp = System.currentTimeMillis();
+            JSONArray arr = root.optJSONArray("apps");
+            if (arr != null) {
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject o = arr.getJSONObject(i);
+                    String pkg = o.optString("pkg", "");
+                    if (pkg.isEmpty()) {
+                        continue;
+                    }
+                    String device = o.optString("device", "speaker");
+                    if (device.isEmpty()) {
+                        device = "speaker";
+                    }
+                    c.apps.add(new App(pkg, device, o.optInt("uid", -1)));
+                }
+            }
+            return c;
+        } catch (Throwable t) {
+            Log.e("config parse failed: " + source, t);
+            return null;
+        }
     }
 
     public static Config load() {

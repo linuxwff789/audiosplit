@@ -1,7 +1,10 @@
 package com.linuxwff789.audiosplit;
 
-import de.robv.android.xposed.XposedBridge;
-
+/**
+ * Logging that works in both worlds: inside system_server (XposedBridge + /data/system log)
+ * and inside this app's own process, where de.robv.android.xposed may not even be on the
+ * classpath - every bridge call is therefore optional and failure-proof.
+ */
 public final class Log {
     public static final String TAG = "AudioSplit";
 
@@ -9,7 +12,7 @@ public final class Log {
     }
 
     public static void i(String msg) {
-        XposedBridge.log(TAG + ": " + msg);
+        bridge(TAG + ": " + msg);
         Status.append(msg);
     }
 
@@ -18,10 +21,18 @@ public final class Log {
         if (t != null) {
             sb.append(" :: ").append(t);
         }
-        XposedBridge.log(TAG + " [E]: " + sb);
+        bridge(TAG + " [E]: " + sb);
         Status.append("[E] " + sb);
         if (t != null) {
-            XposedBridge.log(t);
+            bridge(String.valueOf(t));
+        }
+    }
+
+    private static void bridge(String line) {
+        try {
+            de.robv.android.xposed.XposedBridge.log(line);
+        } catch (Throwable ignored) {
+            // not running inside a hooked process
         }
     }
 }
