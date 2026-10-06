@@ -33,6 +33,9 @@ android {
     lint {
         abortOnError = false
     }
+    buildFeatures {
+        buildConfig = true
+    }
 }
 
 dependencies {
