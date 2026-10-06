@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AudioSplit</string>
+    <string name="xposeddescription">按 app 分流音频:指定应用走扬声器,其余应用继续走蓝牙(UID 设备亲和性)</string>
+</resources>
