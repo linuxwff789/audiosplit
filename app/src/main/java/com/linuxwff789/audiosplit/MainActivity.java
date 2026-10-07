@@ -53,6 +53,7 @@ public class MainActivity extends Activity {
     private AppAdapter adapter;
     private TextView status;
     private BroadcastReceiver statusReceiver;
+    private long lastReplyAt;
 
     private static final class Entry {
         String label;
@@ -106,6 +107,17 @@ public class MainActivity extends Activity {
         });
         buttons.addView(ping, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button check = new Button(this);
+        check.setText("权限自检");
+        check.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                runSelfCheck();
+            }
+        });
+        buttons.addView(check, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(buttons);
 
         status = new TextView(this);
@@ -127,6 +139,7 @@ public class MainActivity extends Activity {
             public void onReceive(Context context, Intent intent) {
                 String text = intent.getStringExtra(Protocol.EXTRA_TEXT);
                 if (text != null) {
+                    lastReplyAt = System.currentTimeMillis();
                     status.setText("system_server 回包:\n" + text);
                 }
             }
@@ -241,6 +254,48 @@ public class MainActivity extends Activity {
             default:
                 return "type" + type;
         }
+    }
+
+    private static String permName(int state) {
+        return state == PackageManager.PERMISSION_GRANTED ? "GRANTED" : "DENIED";
+    }
+
+    /** Local permission/state audit, then ask system_server for its own report. */
+    private void runSelfCheck() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("app 侧自检\n");
+        sb.append("QUERY_ALL_PACKAGES: ")
+                .append(permName(checkSelfPermission("android.permission.QUERY_ALL_PACKAGES")))
+                .append('\n');
+        sb.append("RECEIVE_BOOT_COMPLETED: ")
+                .append(permName(checkSelfPermission("android.permission.RECEIVE_BOOT_COMPLETED")))
+                .append('\n');
+        sb.append("可视应用数: ").append(entries.size()).append('\n');
+
+        AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        sb.append("当前输出设备: ").append(connectedDevices()).append('\n');
+
+        java.io.File f = AppConfigStore.externalFile(this);
+        sb.append("配置文件: ").append(f == null ? "无外部目录"
+                : (f.exists() ? f.getAbsolutePath() + " (" + f.length() + "B)"
+                        : "尚未写入 " + f.getAbsolutePath())).append('\n');
+
+        sb.append("规则数: ").append(AppConfigStore.load(this) == null ? 0 : ruleCount())
+                .append('\n');
+        if (lastReplyAt == 0) {
+            sb.append("system_server: 从未回包 -> 模块未激活 / 需要重启\n");
+        } else {
+            sb.append("system_server: ").append((System.currentTimeMillis() - lastReplyAt) / 1000)
+                    .append("s 前回过包\n");
+        }
+        sb.append("(am=").append(am == null ? "null" : "ok").append(")");
+        status.setText(sb.toString());
+        AppConfigStore.ping(this);
+    }
+
+    private int ruleCount() {
+        Config cfg = Config.parse(AppConfigStore.load(this), "prefs");
+        return cfg == null ? 0 : cfg.apps.size();
     }
 
     private void applyRules() {

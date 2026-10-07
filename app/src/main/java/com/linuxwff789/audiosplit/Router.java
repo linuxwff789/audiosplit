@@ -62,6 +62,10 @@ public final class Router {
     private static boolean sReceiverRegistered;
     private static Object sAudioService;
     private static final java.util.Set<String> sMissingLogged = new java.util.HashSet<>();
+    private static Context sContext;
+    private static String sLastRoute = "not run yet";
+    private static final String PERM_MODIFY_AUDIO_ROUTING =
+            "android.permission.MODIFY_AUDIO_ROUTING";
 
     static void setAudioService(Object audioService) {
         sAudioService = audioService;
@@ -88,11 +92,71 @@ public final class Router {
 
     public static synchronized void start(final Context ctx) {
         sRunning = true;
+        sContext = ctx;
         if (sHandler == null) {
             sHandler = new Handler(Looper.getMainLooper());
         }
         registerConfigReceiver(ctx);
         tick(ctx);
+    }
+
+    /**
+     * Everything the UI needs to judge whether routing can work here: our own permissions as seen
+     * by system_server, policy state, last routing attempt and the devices we can steer to.
+     */
+    static String selfCheck() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("module: injected into system_server, receiver=")
+                .append(sReceiverRegistered).append('\n');
+        sb.append("uid ").append(android.os.Process.myUid()).append(' ')
+                .append(PERM_MODIFY_AUDIO_ROUTING).append(": ")
+                .append(permName(checkCallingPermission(PERM_MODIFY_AUDIO_ROUTING)))
+                .append(" -> permission gate bypassed for uid 0/1000\n");
+        sb.append("audiopolicy: ")
+                .append(sPolicy == null ? "not registered" : "registered").append('\n');
+        sb.append("last route: ").append(sLastRoute).append('\n');
+        sb.append("pinned: ").append(sApplied.isEmpty() ? "(none)" : sApplied.toString())
+                .append('\n');
+        sb.append("devices: ").append(deviceSummary()).append('\n');
+        return sb.toString();
+    }
+
+    private static String deviceSummary() {
+        if (sContext == null) {
+            return "(no context)";
+        }
+        try {
+            AudioManager am = (AudioManager) sContext.getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) {
+                return "(no AudioManager)";
+            }
+            StringBuilder sb = new StringBuilder();
+            for (AudioDeviceInfo d : am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                sb.append("0x").append(Integer.toHexString(d.getType()))
+                        .append("#").append(d.getId()).append(' ');
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return "(failed: " + t + ")";
+        }
+    }
+
+    private static String permName(int result) {
+        return result == 0 ? "GRANTED" : "DENIED(" + result + ")";
+    }
+
+    private static int checkCallingPermission(String permission) {
+        if (sContext == null) {
+            return -1;
+        }
+        try {
+            Object r = XposedHelpers.callMethod(sContext, "checkCallingPermission",
+                    new Class<?>[]{String.class}, permission);
+            return r instanceof Integer ? (Integer) r : -1;
+        } catch (Throwable t) {
+            Log.e("checkCallingPermission(" + permission + ") failed", t);
+            return -1;
+        }
     }
 
     /** The UI pushes its config straight into system_server, no root and no file permissions. */
@@ -141,7 +205,7 @@ public final class Router {
         try {
             Intent out = new Intent(Protocol.ACTION_STATUS);
             out.setPackage(Protocol.PKG);
-            out.putExtra(Protocol.EXTRA_TEXT, Status.tail(80));
+            out.putExtra(Protocol.EXTRA_TEXT, selfCheck() + "---- log ----\n" + Status.tail(60));
             ctx.sendBroadcast(out);
         } catch (Throwable t) {
             Log.e("status broadcast failed", t);
@@ -209,6 +273,7 @@ public final class Router {
             }
         }
         if (mixDevices.isEmpty()) {
+            sLastRoute = "no usable output device";
             Log.e("no usable output device to build mixes for", null);
             return;
         }
@@ -219,6 +284,7 @@ public final class Router {
             register(am, ctx, mixDevices);
             sDeviceSig = sig;
             sApplied.clear();
+            sLastRoute = "policy registered for " + mixDevices.size() + " device(s)";
         }
         if (sPolicy == null) {
             return;
@@ -261,6 +327,8 @@ public final class Router {
                 sApplied.put(e.getKey(), e.getValue());
             }
         }
+        sLastRoute = "rules=" + desired.size() + " pinned=" + sApplied.size()
+                + (sPolicy == null ? " (no policy)" : "");
     }
 
     /**
