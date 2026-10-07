@@ -263,7 +263,7 @@ public final class Router {
         try {
             Intent out = new Intent(Protocol.ACTION_STATUS);
             out.setPackage(Protocol.PKG);
-            out.putExtra(Protocol.EXTRA_TEXT, selfCheck() + "---- log ----\n" + Status.tail(60));
+            out.putExtra(Protocol.EXTRA_TEXT, selfCheck() + "---- log ----\n" + Status.tail(20));
             ctx.sendBroadcast(out);
         } catch (Throwable t) {
             Log.e("status broadcast failed", t);

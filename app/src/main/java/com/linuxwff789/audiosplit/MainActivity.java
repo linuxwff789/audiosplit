@@ -54,6 +54,8 @@ public class MainActivity extends Activity {
     private TextView status;
     private BroadcastReceiver statusReceiver;
     private long lastReplyAt;
+    private String lastStatusText = "";
+    private boolean showLog;
 
     private static final class Entry {
         String label;
@@ -108,6 +110,12 @@ public class MainActivity extends Activity {
         buttons.addView(ping, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        root.addView(buttons);
+
+        LinearLayout buttons2 = new LinearLayout(this);
+        buttons2.setOrientation(LinearLayout.HORIZONTAL);
+        buttons2.setPadding(dp(8), 0, dp(8), dp(4));
+
         Button check = new Button(this);
         check.setText("权限自检");
         check.setOnClickListener(new View.OnClickListener() {
@@ -116,15 +124,31 @@ public class MainActivity extends Activity {
                 runSelfCheck();
             }
         });
-        buttons.addView(check, new LinearLayout.LayoutParams(0,
+        buttons2.addView(check, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        root.addView(buttons);
+
+        final Button logToggle = new Button(this);
+        logToggle.setText("显示日志");
+        logToggle.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showLog = !showLog;
+                logToggle.setText(showLog ? "隐藏日志" : "显示日志");
+                renderStatus();
+            }
+        });
+        buttons2.addView(logToggle, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        root.addView(buttons2);
 
         status = new TextView(this);
         status.setTextSize(11f);
-        status.setPadding(dp(16), dp(4), dp(16), dp(8));
+        status.setPadding(dp(12), dp(6), dp(12), dp(6));
         status.setText("状态: 等待 system_server 回包…(模块需已激活且重启过)");
-        root.addView(status);
+        ScrollView statusScroll = new ScrollView(this);
+        statusScroll.addView(status);
+        root.addView(statusScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(150)));
 
         ListView list = new ListView(this);
         adapter = new AppAdapter();
@@ -140,7 +164,8 @@ public class MainActivity extends Activity {
                 String text = intent.getStringExtra(Protocol.EXTRA_TEXT);
                 if (text != null) {
                     lastReplyAt = System.currentTimeMillis();
-                    status.setText("system_server 回包:\n" + text);
+                    lastStatusText = text;
+                    renderStatus();
                 }
             }
         };
@@ -256,6 +281,18 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Status pane shows the self check only; the log tail is behind the toggle button. */
+    private void renderStatus() {
+        String text = lastStatusText;
+        if (!showLog) {
+            int split = text.indexOf("---- log ----");
+            if (split > 0) {
+                text = text.substring(0, split) + "(日志已折叠,点「显示日志」展开)";
+            }
+        }
+        status.setText(text);
+    }
+
     private static String permName(int state) {
         return state == PackageManager.PERMISSION_GRANTED ? "GRANTED" : "DENIED";
     }
@@ -289,7 +326,8 @@ public class MainActivity extends Activity {
                     .append("s 前回过包\n");
         }
         sb.append("(am=").append(am == null ? "null" : "ok").append(")");
-        status.setText(sb.toString());
+        lastStatusText = sb.toString();
+        renderStatus();
         AppConfigStore.ping(this);
     }
 
