@@ -1,11 +1,14 @@
 package com.linuxwff789.audiosplit;
 
 import android.content.Context;
+import android.os.Binder;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
@@ -34,6 +37,49 @@ public class HookSystem implements IXposedHookLoadPackage {
         if (!hooked) {
             Log.e("could not hook AudioService ready callback", null);
         }
+        hookPolicyPermissionGate(lpparam);
+    }
+
+    /**
+     * AudioService.checkUpdateForPolicy() asks MODIFY_AUDIO_ROUTING from the calling uid; on this
+     * ROM not even system_server (uid 1000) holds it, which makes setUidDeviceAffinity() bail out.
+     * Let uid 0 / 1000 through and keep everyone else denied.
+     */
+    private void hookPolicyPermissionGate(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            XposedHelpers.findAndHookMethod("com.android.server.audio.AudioService",
+                    lpparam.classLoader, "checkUpdateForPolicy",
+                    "android.media.IAudioPolicyCallback", String.class,
+                    new XC_MethodReplacement() {
+                        @Override
+                        protected Object replaceHookedMethod(MethodHookParam param) {
+                            try {
+                                int caller = Binder.getCallingUid();
+                                if (caller != 0 && caller != Process.SYSTEM_UID) {
+                                    return null; // same denial the framework would give
+                                }
+                                Object pcb = param.args[0];
+                                Object binder = XposedHelpers.callMethod(pcb, "asBinder");
+                                Object map = XposedHelpers.getObjectField(
+                                        param.thisObject, "mAudioPolicies");
+                                if (map instanceof java.util.Map) {
+                                    Object proxy = ((java.util.Map<?, ?>) map).get(binder);
+                                    if (proxy != null) {
+                                        return proxy;
+                                    }
+                                    Log.e("policy not registered for uid " + caller, null);
+                                }
+                                return null;
+                            } catch (Throwable t) {
+                                Log.e("permission gate bypass failed", t);
+                                return null;
+                            }
+                        }
+                    });
+            Log.i("policy permission gate hooked (uid 0/1000 allowed)");
+        } catch (Throwable t) {
+            Log.e("hooking permission gate failed", t);
+        }
     }
 
     private boolean hookReady(XC_LoadPackage.LoadPackageParam lpparam, final String method) {
@@ -50,6 +96,7 @@ public class HookSystem implements IXposedHookLoadPackage {
                                     Log.e("AudioService context is null", null);
                                     return;
                                 }
+                                Router.setAudioService(param.thisObject);
                                 new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
                                     @Override
                                     public void run() {

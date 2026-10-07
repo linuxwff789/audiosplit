@@ -60,6 +60,12 @@ public final class Router {
     private static boolean sRunning;
     private static Config sPushed;
     private static boolean sReceiverRegistered;
+    private static Object sAudioService;
+    private static final java.util.Set<String> sMissingLogged = new java.util.HashSet<>();
+
+    static void setAudioService(Object audioService) {
+        sAudioService = audioService;
+    }
 
     private Router() {
     }
@@ -244,18 +250,90 @@ public final class Router {
             }
             AudioDeviceInfo dev = deviceFor(e.getValue(), outs);
             if (dev == null) {
-                Log.e("device '" + e.getValue() + "' unavailable for uid " + e.getKey(), null);
+                String key = e.getValue();
+                if (sMissingLogged.add(key)) {
+                    Log.e("device '" + key + "' not connected, rule for uid " + e.getKey()
+                            + " skipped until it shows up", null);
+                }
                 continue;
             }
-            Object res = call(sPolicy, "setUidDeviceAffinity",
-                    new Class<?>[]{int.class, List.class}, e.getKey(),
-                    Collections.singletonList(dev));
-            Log.i("setUidDeviceAffinity uid=" + e.getKey() + " -> " + e.getValue()
-                    + "(devId " + dev.getId() + ") = " + res);
-            if (Boolean.TRUE.equals(res)) {
+            if (applyAffinity(e.getKey(), dev)) {
                 sApplied.put(e.getKey(), e.getValue());
             }
         }
+    }
+
+    /**
+     * Pin a uid onto a device. The framework's own AudioPolicy API is gated by
+     * {@code AudioService.checkUpdateForPolicy()} which asks for MODIFY_AUDIO_ROUTING from the
+     * *calling* uid - system_server (uid 1000) does not hold it on this ROM, so the direct call
+     * returns false. We therefore keep two fallbacks: call the already resolved AudioPolicyProxy
+     * directly, then the hidden AudioSystem entry point.
+     */
+    private static boolean applyAffinity(int uid, AudioDeviceInfo dev) {
+        try {
+            Object res = call(sPolicy, "setUidDeviceAffinity",
+                    new Class<?>[]{int.class, List.class}, uid,
+                    Collections.singletonList(dev));
+            if (Boolean.TRUE.equals(res)) {
+                Log.i("setUidDeviceAffinity uid=" + uid + " -> dev " + dev.getId()
+                        + " via AudioPolicy API");
+                return true;
+            }
+            Log.i("AudioPolicy API refused uid=" + uid + " (result " + res + "), trying proxy");
+        } catch (Throwable t) {
+            Log.e("AudioPolicy API threw for uid " + uid, t);
+        }
+
+        Object internal = XposedHelpers.callStaticMethod(AudioDeviceInfo.class,
+                "convertDeviceTypeToInternalDevice", dev.getType());
+        int internalType = internal instanceof Integer ? (Integer) internal : 0;
+        int[] types = {internalType};
+        String[] addrs = {dev.getAddress() == null ? "" : dev.getAddress()};
+
+        Object proxy = findPolicyProxy();
+        if (proxy != null) {
+            Object r2 = call(proxy, "setUidDeviceAffinities",
+                    new Class<?>[]{int.class, int[].class, String[].class}, uid, types, addrs);
+            Log.i("AudioPolicyProxy.setUidDeviceAffinities uid=" + uid + " types=0x"
+                    + Integer.toHexString(internalType) + " -> " + r2);
+            if (Integer.valueOf(0).equals(r2)) {
+                return true;
+            }
+        } else {
+            Log.e("no AudioPolicyProxy found for our policy", null);
+        }
+
+        try {
+            Class<?> audioSystem = XposedHelpers.findClass("android.media.AudioSystem", sCl);
+            Object r3 = XposedHelpers.callStaticMethod(audioSystem, "setUidDeviceAffinities",
+                    uid, types, addrs);
+            Log.i("AudioSystem.setUidDeviceAffinities uid=" + uid + " -> " + r3);
+            return Integer.valueOf(0).equals(r3);
+        } catch (Throwable t) {
+            Log.e("AudioSystem fallback failed", t);
+            return false;
+        }
+    }
+
+    private static Object findPolicyProxy() {
+        if (sAudioService == null || sPolicy == null) {
+            return null;
+        }
+        try {
+            Object pcb = call(sPolicy, "cb", new Class<?>[]{});
+            if (pcb == null) {
+                return null;
+            }
+            Object binder = call(pcb, "asBinder", new Class<?>[]{});
+            Object map = XposedHelpers.getObjectField(sAudioService, "mAudioPolicies");
+            if (map instanceof java.util.Map && binder != null) {
+                return ((java.util.Map<?, ?>) map).get(binder);
+            }
+        } catch (Throwable t) {
+            Log.e("findPolicyProxy failed", t);
+        }
+        return null;
     }
 
     private static void register(AudioManager am, Context ctx, List<AudioDeviceInfo> devices) {
@@ -271,7 +349,13 @@ public final class Router {
             }
             Object policy = XposedHelpers.callMethod(pb, "build");
             Object res = call(am, "registerAudioPolicy", new Class<?>[]{cPolicy}, policy);
-            Log.i("registerAudioPolicy -> " + res + " (mixes=" + mixes.size() + ")");
+            StringBuilder names = new StringBuilder();
+            for (AudioDeviceInfo d : devices) {
+                names.append("type=0x").append(Integer.toHexString(d.getType()))
+                        .append(" id=").append(d.getId()).append(' ');
+            }
+            Log.i("registerAudioPolicy -> " + res + " mixes=" + mixes.size() + " [" + names
+                    + "]");
             sPolicy = policy;
         } catch (Throwable t) {
             Log.e("registering audio policy failed", t);

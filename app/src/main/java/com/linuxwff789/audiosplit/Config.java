@@ -27,7 +27,6 @@ import java.util.List;
 public final class Config {
 
     public static final String[] PATHS = {
-            "/data/local/tmp/audiosplit.json",
             "/data/system/audiosplit.json",
             // the UI writes here; system_server reads the real path under /data/media
             "/data/media/0/Android/data/com.linuxwff789.audiosplit/files/audiosplit.json",
