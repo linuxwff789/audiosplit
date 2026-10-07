@@ -73,8 +73,10 @@ public final class Router {
 
     /** uid currently pinned by the UI (device available or not) - used by the focus hooks. */
     static boolean isPinned(int uid) {
-        return sApplied.containsKey(uid);
+        return sApplied.containsKey(uid) || sPinUids.contains(uid);
     }
+
+    private static final java.util.Set<Integer> sPinUids = new java.util.HashSet<>();
 
     private static String sFocusInfo = "not installed";
     private static String sLastFocusLog = "";
@@ -327,6 +329,21 @@ public final class Router {
                 sApplied.clear();
                 sDeviceSig = "";
             }
+            // The focus hooks ask isPinned(uid): without the mix machinery that set would stay
+            // empty and configured apps would steal focus from each other again.
+            java.util.Set<Integer> uids = new java.util.HashSet<>();
+            android.content.pm.PackageManager pm = ctx.getPackageManager();
+            for (Config.App app : cfg.apps) {
+                try {
+                    uids.add(pm.getPackageUid(app.pkg, 0));
+                } catch (Throwable t) {
+                    Log.e("cannot resolve uid of " + app.pkg, t);
+                }
+            }
+            sPinUids.clear();
+            sPinUids.addAll(uids);
+            Log.i("focus-protected uids " + sPinUids + " from " + cfg.apps.size()
+                    + " configured app(s)");
             sLastRoute = "strategy mode: " + speakerPkgs.size() + " app(s) -> speaker, "
                     + (cfg.apps.size() - speakerPkgs.size()) + " app(s) follow the system";
             return;
