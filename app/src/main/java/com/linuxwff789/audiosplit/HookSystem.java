@@ -70,6 +70,7 @@ public class HookSystem implements IXposedHookLoadPackage {
                                 Router.setAudioService(audioService);
                                 hookPermissionGate(audioService);
                                 hookFocus(audioService);
+                                hookPlayers(audioService);
                                 new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
                                     @Override
                                     public void run() {
@@ -293,6 +294,60 @@ public class HookSystem implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             Log.e("hooking focus failed", t);
             Router.setFocusInfo("failed: " + t);
+        }
+    }
+
+    /**
+     * Player lifecycle probe: records which uid started/stopped playing, so a test run leaves
+     * hard evidence of whether two apps were really playing at the same time.
+     */
+    private void hookPlayers(Object audioService) {
+        try {
+            int hooked = 0;
+            for (final Method m : audioService.getClass().getDeclaredMethods()) {
+                if ("trackPlayer".equals(m.getName()) && m.getReturnType() == int.class) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Router.logFocus("player start uid=" + Binder.getCallingUid()
+                                        + " piid=" + param.getResult());
+                            } catch (Throwable ignored) {
+                                // probe only
+                            }
+                        }
+                    });
+                    hooked++;
+                } else if ("playerEvent".equals(m.getName())) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Router.logFocus("player event piid=" + param.args[0]
+                                        + " event=" + param.args[1]);
+                            } catch (Throwable ignored) {
+                                // probe only
+                            }
+                        }
+                    });
+                    hooked++;
+                } else if ("releasePlayer".equals(m.getName())) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Router.logFocus("player release piid=" + param.args[0]);
+                            } catch (Throwable ignored) {
+                                // probe only
+                            }
+                        }
+                    });
+                    hooked++;
+                }
+            }
+            Log.i("player hooks installed: " + hooked);
+        } catch (Throwable t) {
+            Log.e("hooking players failed", t);
         }
     }
 
