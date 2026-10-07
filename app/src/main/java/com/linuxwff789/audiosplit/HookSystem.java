@@ -38,6 +38,79 @@ public class HookSystem implements IXposedHookLoadPackage {
             Log.e("could not hook AudioService ready callback", null);
         }
         hookPolicyPermissionGate(lpparam);
+        hookFocus(lpparam);
+    }
+
+    /**
+     * Audio focus: Android pauses/ducks the current player whenever another app takes focus. For
+     * the "two sounds at once" use case the pinned apps must ignore focus loss, otherwise the
+     * second app stops the first no matter how the devices are routed.
+     *
+     * Method names are resolved by reflection (no hard signature), and the discovered names are
+     * reported in the UI self check.
+     */
+    private void hookFocus(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            Class<?> focusControl = XposedHelpers.findClass("android.media.MediaFocusControl",
+                    lpparam.classLoader);
+            int hooked = 0;
+            StringBuilder names = new StringBuilder();
+            for (final java.lang.reflect.Method m : focusControl.getDeclaredMethods()) {
+                names.append(m.getName()).append(' ');
+                if ("dispatchAudioFocusChange".equals(m.getName())) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                int change = Integer.MIN_VALUE;
+                                int uid = -1;
+                                for (Object arg : param.args) {
+                                    if (arg instanceof Integer) {
+                                        change = (Integer) arg;
+                                    } else if (arg != null && arg.getClass().getName()
+                                            .endsWith("AudioFocusInfo")) {
+                                        Object u = XposedHelpers.callMethod(arg, "getClientUid");
+                                        if (u instanceof Integer) {
+                                            uid = (Integer) u;
+                                        }
+                                    }
+                                }
+                                // 1 = LOSS, 2 = LOSS_TRANSIENT, 3 = LOSS_TRANSIENT_CAN_DUCK
+                                if (uid > 0 && change >= 1 && change <= 3 && Router.isPinned(uid)) {
+                                    Router.logFocus("suppressed loss change=" + change
+                                            + " uid=" + uid);
+                                    param.setResult(null);
+                                }
+                            } catch (Throwable t) {
+                                Router.logFocus("loss hook error " + t);
+                            }
+                        }
+                    });
+                    hooked++;
+                } else if ("requestAudioFocus".equals(m.getName())) {
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                int uid = Binder.getCallingUid();
+                                if (Router.isPinned(uid)) {
+                                    Router.logFocus("request uid=" + uid + " result="
+                                            + param.getResult());
+                                }
+                            } catch (Throwable ignored) {
+                                // never break focus handling
+                            }
+                        }
+                    });
+                    hooked++;
+                }
+            }
+            Router.setFocusInfo(hooked + " hooks; methods: " + names);
+            Log.i("focus hooks installed: " + hooked);
+        } catch (Throwable t) {
+            Log.e("hooking focus failed", t);
+            Router.setFocusInfo("failed: " + t);
+        }
     }
 
     /**
@@ -47,9 +120,11 @@ public class HookSystem implements IXposedHookLoadPackage {
      */
     private void hookPolicyPermissionGate(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
+            Class<?> policyCallback = XposedHelpers.findClass("android.media.IAudioPolicyCallback",
+                    lpparam.classLoader);
             XposedHelpers.findAndHookMethod("com.android.server.audio.AudioService",
                     lpparam.classLoader, "checkUpdateForPolicy",
-                    "android.media.IAudioPolicyCallback", String.class,
+                    policyCallback, String.class,
                     new XC_MethodReplacement() {
                         @Override
                         protected Object replaceHookedMethod(MethodHookParam param) {

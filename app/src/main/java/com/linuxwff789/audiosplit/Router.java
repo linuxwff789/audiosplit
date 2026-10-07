@@ -71,6 +71,30 @@ public final class Router {
         sAudioService = audioService;
     }
 
+    /** uid currently pinned by the UI (device available or not) - used by the focus hooks. */
+    static boolean isPinned(int uid) {
+        return sApplied.containsKey(uid);
+    }
+
+    private static String sFocusInfo = "not installed";
+    private static String sLastFocusLog = "";
+    private static long sLastFocusLogAt;
+
+    static void setFocusInfo(String info) {
+        sFocusInfo = info;
+    }
+
+    /** Rate-limited focus logging: repeated identical events must not flood the status log. */
+    static void logFocus(String msg) {
+        long now = System.currentTimeMillis();
+        if (msg.equals(sLastFocusLog) && now - sLastFocusLogAt < 5000) {
+            return;
+        }
+        sLastFocusLog = msg;
+        sLastFocusLogAt = now;
+        Log.i("[focus] " + msg);
+    }
+
     private Router() {
     }
 
@@ -115,10 +139,35 @@ public final class Router {
         sb.append("audiopolicy: ")
                 .append(sPolicy == null ? "not registered" : "registered").append('\n');
         sb.append("last route: ").append(sLastRoute).append('\n');
+        sb.append("focus: ").append(sFocusInfo).append('\n');
         sb.append("pinned: ").append(sApplied.isEmpty() ? "(none)" : sApplied.toString())
                 .append('\n');
         sb.append("devices: ").append(deviceSummary()).append('\n');
+        sb.append("playing: ").append(playingSummary()).append('\n');
         return sb.toString();
+    }
+
+    /** Which uids the framework currently sees as playing (anonymised on locked-down builds). */
+    private static String playingSummary() {
+        if (sContext == null) {
+            return "(no context)";
+        }
+        try {
+            AudioManager am = (AudioManager) sContext.getSystemService(Context.AUDIO_SERVICE);
+            Object list = XposedHelpers.callMethod(am, "getActivePlaybackConfigurations");
+            if (!(list instanceof java.util.List)) {
+                return "?";
+            }
+            StringBuilder sb = new StringBuilder();
+            for (Object conf : (java.util.List<?>) list) {
+                Object uid = XposedHelpers.callMethod(conf, "getClientUid");
+                Object state = XposedHelpers.callMethod(conf, "getPlayerState");
+                sb.append(uid).append('/').append(state).append(' ');
+            }
+            return sb.length() == 0 ? "(nothing)" : sb.toString();
+        } catch (Throwable t) {
+            return "(failed: " + t + ")";
+        }
     }
 
     private static String deviceSummary() {
@@ -316,11 +365,16 @@ public final class Router {
             }
             AudioDeviceInfo dev = deviceFor(e.getValue(), outs);
             if (dev == null) {
+                // Keep the uid pinned even when its device is gone: fall back to the default
+                // device so that focus protection still applies to it.
+                dev = defaultDev;
                 String key = e.getValue();
-                if (sMissingLogged.add(key)) {
-                    Log.e("device '" + key + "' not connected, rule for uid " + e.getKey()
-                            + " skipped until it shows up", null);
+                if (dev != null && sMissingLogged.add(key)) {
+                    Log.e("device '" + key + "' not connected, uid " + e.getKey()
+                            + " stays on the default device for now", null);
                 }
+            }
+            if (dev == null) {
                 continue;
             }
             if (applyAffinity(e.getKey(), dev)) {
@@ -393,7 +447,12 @@ public final class Router {
             if (pcb == null) {
                 return null;
             }
-            Object binder = call(pcb, "asBinder", new Class<?>[]{});
+            Object binder = null;
+            try {
+                binder = pcb.getClass().getMethod("asBinder").invoke(pcb);
+            } catch (Throwable t) {
+                Log.e("asBinder() failed", t);
+            }
             Object map = XposedHelpers.getObjectField(sAudioService, "mAudioPolicies");
             if (map instanceof java.util.Map && binder != null) {
                 return ((java.util.Map<?, ?>) map).get(binder);
