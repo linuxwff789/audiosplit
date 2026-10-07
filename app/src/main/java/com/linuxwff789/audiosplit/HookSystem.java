@@ -167,8 +167,17 @@ public class HookSystem implements IXposedHookLoadPackage {
     }
 
     /**
-     * Suppress AUDIOFOCUS_LOSS/LOSS_TRANSIENT/LOSS_TRANSIENT_CAN_DUCK delivery to pinned uids, so
-     * two pinned apps cannot pause each other.
+     * Two independent levers so pinned apps never pause each other:
+     *
+     * <ol>
+     *   <li>a focus request from a pinned uid is answered with REQUEST_GRANTED without touching
+     *       the focus stack, so it cannot push anyone out;</li>
+     *   <li>any void method on the focus controller (and on the objects it holds) that looks like
+     *       it delivers a focus change is skipped when it would hand LOSS to a pinned uid.</li>
+     * </ol>
+     *
+     * Method names are never assumed: the controller object is taken from AudioService and every
+     * candidate is discovered by reflection; the discovered names are written to the log too.
      */
     private void hookFocus(Object audioService) {
         try {
@@ -178,70 +187,123 @@ public class HookSystem implements IXposedHookLoadPackage {
                 Log.e("focus controller not found", null);
                 return;
             }
-            Class<?> cls = focus.getClass();
+            java.util.List<Object> targets = new java.util.ArrayList<>();
+            targets.add(focus);
+            // one level of nested helpers (FocusStack, ExtPolicyAdapter, ...)
+            for (Field f : focus.getClass().getDeclaredFields()) {
+                try {
+                    f.setAccessible(true);
+                    Object value = f.get(focus);
+                    if (value != null && !(value instanceof Number) && !(value instanceof String)
+                            && !(value instanceof Boolean)
+                            && !(value instanceof java.util.Collection)
+                            && !(value instanceof java.util.Map)) {
+                        targets.add(value);
+                    }
+                } catch (Throwable ignored) {
+                    // unreadable field
+                }
+            }
+
             int hooked = 0;
             StringBuilder names = new StringBuilder();
-            for (final Method m : cls.getDeclaredMethods()) {
-                names.append(m.getName()).append(' ');
-                boolean isChangeDelivery = m.getName().toLowerCase().contains("focuschange")
-                        && hasIntParameter(m) && m.getReturnType() == void.class;
-                boolean isRequest = "requestAudioFocus".equals(m.getName());
-                if (!isChangeDelivery && !isRequest) {
-                    continue;
-                }
-                if (isChangeDelivery) {
-                    XposedBridge.hookMethod(m, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                int change = Integer.MIN_VALUE;
-                                int uid = -1;
-                                for (Object arg : param.args) {
-                                    if (arg instanceof Integer) {
-                                        change = (Integer) arg;
-                                    } else if (arg != null && arg.getClass().getName()
-                                            .endsWith("AudioFocusInfo")) {
-                                        Object u = XposedHelpers.callMethod(arg, "getClientUid");
-                                        if (u instanceof Integer) {
-                                            uid = (Integer) u;
+            java.util.Set<String> hookedSignatures = new java.util.HashSet<>();
+            for (Object target : targets) {
+                Class<?> cls = target.getClass();
+                names.append('[').append(cls.getName()).append("] ");
+                for (final Method m : cls.getDeclaredMethods()) {
+                    names.append(m.getName()).append(' ');
+                    boolean isRequest = "requestAudioFocus".equals(m.getName());
+                    boolean looksLikeDelivery = m.getReturnType() == void.class
+                            && hasIntParameter(m)
+                            && matches(m.getName(), "loss", "duck", "focus", "propagate",
+                                    "dispatch", "notify", "send", "handle");
+                    if (!isRequest && !looksLikeDelivery) {
+                        continue;
+                    }
+                    String key = cls.getName() + '#' + m.getName() + m.getParameterCount();
+                    if (!hookedSignatures.add(key)) {
+                        continue;
+                    }
+                    if (isRequest) {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                try {
+                                    int uid = Binder.getCallingUid();
+                                    if (!Router.isPinned(uid)) {
+                                        return;
+                                    }
+                                    Router.logFocus("no-op focus grant uid=" + uid);
+                                    // AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                                    param.setResult(Integer.valueOf(1));
+                                } catch (Throwable t) {
+                                    Router.logFocus("request hook error " + t);
+                                }
+                            }
+                        });
+                    } else {
+                        XposedBridge.hookMethod(m, new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                try {
+                                    int change = Integer.MIN_VALUE;
+                                    int uid = -1;
+                                    for (Object arg : param.args) {
+                                        if (arg instanceof Integer) {
+                                            change = (Integer) arg;
+                                        } else if (arg != null && arg.getClass().getName()
+                                                .endsWith("AudioFocusInfo")) {
+                                            Object u = XposedHelpers.callMethod(arg, "getClientUid");
+                                            if (u instanceof Integer) {
+                                                uid = (Integer) u;
+                                            }
                                         }
                                     }
+                                    if (uid <= 0) {
+                                        return;
+                                    }
+                                    // 1 = LOSS, 2 = LOSS_TRANSIENT, 3 = LOSS_TRANSIENT_CAN_DUCK
+                                    boolean isLoss = change >= 1 && change <= 3;
+                                    if (!Router.isPinned(uid)) {
+                                        if (isLoss) {
+                                            Router.logFocus("loss to unpinned uid=" + uid
+                                                    + " change=" + change + " via " + m.getName());
+                                        }
+                                        return;
+                                    }
+                                    Router.logFocus("focus delivery to pinned uid=" + uid
+                                            + " change=" + change + " via " + m.getName()
+                                            + (isLoss ? " (suppressed)" : ""));
+                                    if (isLoss) {
+                                        param.setResult(null);
+                                    }
+                                } catch (Throwable t) {
+                                    Router.logFocus("delivery hook error " + t);
                                 }
-                                if (uid > 0 && change >= 1 && change <= 3
-                                        && Router.isPinned(uid)) {
-                                    Router.logFocus("suppressed loss change=" + change
-                                            + " uid=" + uid + " via " + m.getName());
-                                    param.setResult(null);
-                                }
-                            } catch (Throwable t) {
-                                Router.logFocus("loss hook error " + t);
                             }
-                        }
-                    });
-                } else {
-                    XposedBridge.hookMethod(m, new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                int uid = Binder.getCallingUid();
-                                if (Router.isPinned(uid)) {
-                                    Router.logFocus("request uid=" + uid + " result="
-                                            + param.getResult());
-                                }
-                            } catch (Throwable ignored) {
-                                // never break focus handling
-                            }
-                        }
-                    });
+                        });
+                    }
+                    hooked++;
                 }
-                hooked++;
             }
-            Router.setFocusInfo(hooked + " hooks on " + cls.getName() + "; methods: " + names);
-            Log.i("focus hooks installed: " + hooked + " on " + cls.getName());
+            Router.setFocusInfo(hooked + " hooks on " + focus.getClass().getName());
+            Log.i("focus hooks installed: " + hooked + " on " + focus.getClass().getName());
+            Log.i("focus methods: " + names);
         } catch (Throwable t) {
             Log.e("hooking focus failed", t);
             Router.setFocusInfo("failed: " + t);
         }
+    }
+
+    private static boolean matches(String name, String... needles) {
+        String lower = name.toLowerCase();
+        for (String n : needles) {
+            if (lower.contains(n)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean hasIntParameter(Method m) {

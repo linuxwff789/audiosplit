@@ -79,6 +79,7 @@ public final class Router {
     private static String sFocusInfo = "not installed";
     private static String sLastFocusLog = "";
     private static long sLastFocusLogAt;
+    private static String sLastState = "";
 
     static void setFocusInfo(String info) {
         sFocusInfo = info;
@@ -168,6 +169,14 @@ public final class Router {
         } catch (Throwable t) {
             return "(failed: " + t + ")";
         }
+    }
+
+    /** Compact device list for the periodic state line. */
+    private static String devicesForLog() {
+        if (sPolicy == null) {
+            return " | no policy";
+        }
+        return " | mixes=" + sDeviceSig;
     }
 
     private static String deviceSummary() {
@@ -276,6 +285,11 @@ public final class Router {
                     Log.i("applying config: " + cfg);
                 }
                 apply(ctx, cfg);
+            }
+            String state = playingSummary() + devicesForLog();
+            if (!state.equals(sLastState)) {
+                sLastState = state;
+                Log.i("state: " + state);
             }
         } catch (Throwable t) {
             Log.e("tick failed", t);
