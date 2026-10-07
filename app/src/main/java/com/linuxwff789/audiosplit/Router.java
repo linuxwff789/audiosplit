@@ -80,6 +80,8 @@ public final class Router {
     private static String sLastFocusLog = "";
     private static long sLastFocusLogAt;
     private static String sLastState = "";
+    static final String SETTING_SPEAKER_PKGS = "audiosplit_speaker_pkgs";
+    private static String sLastSpeakerSetting = "\u0000";
 
     static void setFocusInfo(String info) {
         sFocusInfo = info;
@@ -305,6 +307,31 @@ public final class Router {
     }
 
     private static void apply(Context ctx, Config cfg) {
+        List<String> speakerPkgs = new ArrayList<>();
+        for (Config.App app : cfg.apps) {
+            if ("speaker".equals(app.device)) {
+                speakerPkgs.add(app.pkg);
+            }
+        }
+        writeSpeakerTargets(ctx, speakerPkgs);
+
+        if (!cfg.useMixes) {
+            // Strategy mode (default): the speaker pinning happens inside the target apps
+            // (HookApp rewrites their AudioAttributes), nothing to register here.
+            if (sPolicy != null) {
+                AudioManager existing =
+                        (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+                if (existing != null) {
+                    unregister(existing);
+                }
+                sApplied.clear();
+                sDeviceSig = "";
+            }
+            sLastRoute = "strategy mode: " + speakerPkgs.size() + " app(s) -> speaker, "
+                    + (cfg.apps.size() - speakerPkgs.size()) + " app(s) follow the system";
+            return;
+        }
+
         if (cPolicyBuilder == null || cPolicy == null) {
             Log.e("audiopolicy classes unavailable, cannot apply", null);
             return;
@@ -475,6 +502,33 @@ public final class Router {
             Log.e("findPolicyProxy failed", t);
         }
         return null;
+    }
+
+    /**
+     * Publish the speaker-pinned package list where the app-side hooks can read it without any
+     * permission: Settings.Global. Written here (system_server), read by HookApp in each app.
+     */
+    private static void writeSpeakerTargets(Context ctx, List<String> pkgs) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (String p : pkgs) {
+                if (sb.length() > 0) {
+                    sb.append(',');
+                }
+                sb.append(p);
+            }
+            String value = sb.toString();
+            if (value.equals(sLastSpeakerSetting)) {
+                return;
+            }
+            sLastSpeakerSetting = value;
+            boolean ok = android.provider.Settings.Global.putString(ctx.getContentResolver(),
+                    SETTING_SPEAKER_PKGS, value);
+            Log.i("speaker targets -> Settings.Global[" + SETTING_SPEAKER_PKGS + "]=" + value
+                    + " ok=" + ok);
+        } catch (Throwable t) {
+            Log.e("publishing speaker targets failed", t);
+        }
     }
 
     private static void register(AudioManager am, Context ctx, List<AudioDeviceInfo> devices) {

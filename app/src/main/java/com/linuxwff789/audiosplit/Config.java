@@ -52,6 +52,8 @@ public final class Config {
     public final List<App> apps = new ArrayList<>();
     public String source = "";
     public long stamp;
+    /** Policy-mix based routing is off by default: on this ROM APM puts both mixes on one output. */
+    public boolean useMixes;
 
     private Config() {
     }
@@ -66,6 +68,7 @@ public final class Config {
             Config c = new Config();
             c.source = source;
             c.stamp = System.currentTimeMillis();
+            c.useMixes = root.optBoolean("use_mixes", false);
             JSONArray arr = root.optJSONArray("apps");
             if (arr != null) {
                 for (int i = 0; i < arr.length(); i++) {
@@ -107,6 +110,7 @@ public final class Config {
                 Config c = new Config();
                 c.source = path;
                 c.stamp = f.lastModified();
+                c.useMixes = root.optBoolean("use_mixes", false);
                 JSONArray arr = root.optJSONArray("apps");
                 if (arr != null) {
                     for (int i = 0; i < arr.length(); i++) {

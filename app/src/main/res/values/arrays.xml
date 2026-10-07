@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Recommended scope: system_server plus the apps that get pinned to the speaker.
+         The effective scope lives in the LSPosed database. -->
     <string-array name="xposed_scope">
         <item>android</item>
+        <item>com.maxmpz.audioplayer</item>
+        <item>io.legato.kazusa</item>
+        <item>com.ss.android.ugc.aweme</item>
     </string-array>
 </resources>
